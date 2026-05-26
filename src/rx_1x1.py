@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Receptor minimal 1x1 para Pix2Cam_Com.
+Receptor minimalista 1x1 con sincronización por transiciones.
 
-Lee video en vivo, detecta si el cuadrado es NEGRO (0) o BLANCO (1).
-Reconstruye los bits en bytes.
+Lee video en vivo y detecta transiciones (cambios entre negro/blanco).
+Las primeras 5 transiciones permiten calibrar la duración del bit.
+Luego decodifica correctamente con timing automático.
 
 Uso:
-    python3 src/rx_1x1.py [--camera 0] [--frame-ms 1000] [--debug]
+    python3 src/rx_1x1.py [--camera 0] [--debug]
 
 Teclas:
     'd' = toggle debug
@@ -55,9 +56,8 @@ def bits_to_byte(bits: list[int]) -> int:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Receptor 1x1 minimalista")
+    parser = argparse.ArgumentParser(description="Receptor 1x1 con sincronización por transiciones")
     parser.add_argument("--camera", type=int, default=0, help="Índice de cámara")
-    parser.add_argument("--frame-ms", type=int, default=1000, help="Duración esperada del frame")
     parser.add_argument("--debug", action="store_true", help="Modo debug")
     parser.add_argument("--output", type=Path, help="Archivo de salida")
     
@@ -73,16 +73,23 @@ def main():
     cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Mantener solo el frame más reciente
     
-    print("Receptor 1x1")
-    print("Esperando bits... (d=debug, q=salir)")
+    print("Receptor 1x1 con sincronización por transiciones")
+    print("Esperando transiciones para calibrar... (d=debug, q=salir)")
     
     debug_mode = args.debug
+    
+    # Estado de sincronización
+    transition_times = []  # Tiempos de transiciones
+    bit_duration = None  # Duración calculada del bit
+    last_bit: Optional[int] = None
+    synced = False
+    
+    # Estado de decodificación
     collected_bits = []
     collected_bytes = bytearray()
-    last_bit: Optional[int] = None
-    stable_frames = 0
-    last_update_time = 0.0
-    sample_period = args.frame_ms / 1000.0
+    last_sample_time = 0.0
+    sample_count = 0
+    start_time = time.monotonic()
     
     try:
         while True:
@@ -91,44 +98,62 @@ def main():
                 print("Error leyendo frame")
                 continue
             
-            # Detectar bit
+            current_time = time.monotonic()
             detected_bit = detect_bit(frame, debug=debug_mode)
             
             if detected_bit is not None:
-                now = time.monotonic()
-                
-                # Estabilidad: esperar a que se repita el bit
-                if detected_bit == last_bit:
-                    stable_frames += 1
-                    
-                    # Emitir si es estable y pasó suficiente tiempo
-                    if stable_frames >= 2 and now >= last_update_time:
-                        collected_bits.append(detected_bit)
+                # ===== FASE 1: SINCRONIZACIÓN POR TRANSICIONES =====
+                if not synced and len(transition_times) < 5:
+                    # Detectar transición (cambio de bit)
+                    if last_bit is not None and detected_bit != last_bit:
+                        transition_times.append(current_time)
+                        print(f"[Transición {len(transition_times)}] en t={current_time - start_time:.3f}s")
                         
-                        # Mostrar progreso
-                        if len(collected_bits) <= 8:
-                            print(f"Bit {len(collected_bits)}: {detected_bit}")
+                        # Si tenemos 5 transiciones, calcular duración del bit
+                        if len(transition_times) == 5:
+                            # Calcular intervalos entre transiciones
+                            intervals = [transition_times[i+1] - transition_times[i] 
+                                       for i in range(len(transition_times)-1)]
+                            bit_duration = np.mean(intervals)
+                            print(f"\n[SYNCED] Duración calibrada del bit: {bit_duration*1000:.1f}ms")
+                            print(f"Intervalos: {[f'{x*1000:.1f}ms' for x in intervals]}")
+                            synced = True
+                            last_sample_time = transition_times[-1]
+                            sample_count = 0
+                    
+                    last_bit = detected_bit
+                
+                # ===== FASE 2: DECODIFICACIÓN CON TIMING CALIBRADO =====
+                elif synced and bit_duration is not None:
+                    # Muestrear cada bit_duration
+                    time_since_sync = current_time - last_sample_time
+                    
+                    if time_since_sync >= bit_duration * 0.9:  # 90% del período
+                        collected_bits.append(detected_bit)
+                        sample_count += 1
+                        
+                        print(f"Bit {len(collected_bits)}: {detected_bit} (t={time_since_sync*1000:.1f}ms)")
                         
                         # Si completamos un byte
                         if len(collected_bits) == 8:
                             byte_val = bits_to_byte(collected_bits)
                             collected_bytes.append(byte_val)
-                            print(f"  → Byte {len(collected_bytes)}: 0x{byte_val:02X} ({chr(byte_val) if 32 <= byte_val < 127 else '?'})")
+                            printable = chr(byte_val) if 32 <= byte_val < 127 else f"0x{byte_val:02X}"
+                            print(f"  → Byte {len(collected_bytes)}: {printable}\n")
                             collected_bits = []
                         
-                        last_update_time = now + sample_period * 0.8
-                else:
-                    last_bit = detected_bit
-                    stable_frames = 0
+                        last_sample_time = current_time
             
             # UI
             display = frame.copy()
             h, w = display.shape[:2]
             
-            # Mostrar estado en la esquina
-            status_text = f"Bits: {len(collected_bits)}/8 | Bytes: {len(collected_bytes)}"
-            cv2.putText(display, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            if not synced:
+                status = f"Sincronizando... {len(transition_times)}/5 transiciones"
+            else:
+                status = f"Bits: {len(collected_bits)}/8 | Bytes: {len(collected_bytes)}"
             
+            cv2.putText(display, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             cv2.imshow("Receptor 1x1", display)
             
             key = cv2.waitKey(1) & 0xFF
@@ -157,3 +182,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

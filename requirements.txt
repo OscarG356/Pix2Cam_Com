@@ -1,5 +1,7 @@
 # Dependencias compartidas por emisor y receptor.
 # Numpy: procesamiento numérico y manipulación de imagen.
 # OpenCV: captura de cámara, ROI y decodificación.
+# Pillow: generación de imágenes en emisor.
 numpy==2.4.6
 opencv-python==4.13.0.92
+Pillow==10.1.0

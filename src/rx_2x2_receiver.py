@@ -83,28 +83,42 @@ def symbols_to_byte(symbols: Sequence[int]) -> int:
     return value
 
 
-def detect_screen_roi(frame_bgr: np.ndarray) -> Optional[np.ndarray]:
+def detect_screen_roi(frame_bgr: np.ndarray, debug: bool = False) -> Optional[tuple[np.ndarray, int]]:
     """
     Intenta localizar automaticamente el cuadrilatero principal del emisor.
+    
+    Usa Canny edge detection para encontrar bordes en lugar de threshold,
+    que es más robusto cuando la imagen está saturada de luz.
 
-    La idea es simple:
-    - convertir a gris,
-    - umbralizar lo no negro,
-    - dilatar para conectar las 4 celdas,
-    - buscar el contorno mayor,
-    - rectificar con homografia.
+    Retorna: (warped_roi, side_size) o None si no detecta nada
 
-    Si no hay una deteccion confiable, retorna None y se usa ROI manual.
+    Parámetros ajustables:
+    - Canny thresholds: (100, 200) detecta bordes con histéresis
+    - DILATE_KERNEL: conecta bordes fragmentados
+    
+    Si debug=True, muestra pasos intermedios.
     """
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, binary = cv2.threshold(blurred, 12, 255, cv2.THRESH_BINARY)
+    
+    # Usa Canny edge detection en lugar de threshold
+    # Esto detecta transiciones (bordes) entre áreas de diferente intensidad
+    edges = cv2.Canny(blurred, 100, 200)
+    
+    if debug:
+        print(f"[DEBUG] Gray min={gray.min()}, max={gray.max()}, mean={gray.mean():.1f}")
+        print(f"[DEBUG] Canny edge pixels: {np.count_nonzero(edges)} / {edges.size}")
 
-    # La dilatacion une las celdas y ayuda a formar una sola region detectable.
-    kernel = np.ones((13, 13), dtype=np.uint8)
-    binary = cv2.dilate(binary, kernel, iterations=2)
+    # Dilate para conectar las 4 celdas (que están próximas)
+    kernel_size = 11
+    kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
+    edges = cv2.dilate(edges, kernel, iterations=2)
 
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    if debug:
+        print(f"[DEBUG] Contornos detectados: {len(contours)}")
+    
     if not contours:
         return None
 
@@ -112,9 +126,14 @@ def detect_screen_roi(frame_bgr: np.ndarray) -> Optional[np.ndarray]:
     frame_area = float(h * w)
     contours = sorted(contours, key=cv2.contourArea, reverse=True)
 
-    for contour in contours:
+    for idx, contour in enumerate(contours):
         area = cv2.contourArea(contour)
-        if area < frame_area * 0.01:
+        min_area = frame_area * 0.005  # Muy bajo para ser permisivo
+        
+        if debug:
+            print(f"[DEBUG] Contorno {idx}: área={area:.0f}, mín={min_area:.0f}")
+        
+        if area < min_area:
             continue
 
         rect = cv2.minAreaRect(contour)
@@ -126,7 +145,11 @@ def detect_screen_roi(frame_bgr: np.ndarray) -> Optional[np.ndarray]:
         height_a = np.linalg.norm(box[1] - box[2])
         height_b = np.linalg.norm(box[0] - box[3])
         side = int(max(width_a, width_b, height_a, height_b))
-        if side < 50:
+        
+        if debug:
+            print(f"[DEBUG] Caja: w_a={width_a:.0f}, w_b={width_b:.0f}, h_a={height_a:.0f}, h_b={height_b:.0f}, side={side}")
+        
+        if side < 40:  # Bajo para ser permisivo
             continue
 
         dst = np.array(
@@ -135,8 +158,15 @@ def detect_screen_roi(frame_bgr: np.ndarray) -> Optional[np.ndarray]:
         )
         matrix = cv2.getPerspectiveTransform(box, dst)
         warped = cv2.warpPerspective(frame_bgr, matrix, (side, side))
-        return warped
+        
+        if debug:
+            print(f"[DEBUG] ROI detectada exitosamente, tamaño: {side}x{side}")
+        
+        return (warped, side)
 
+    if debug:
+        print("[DEBUG] No se encontró ROI válida")
+    
     return None
 
 
@@ -225,6 +255,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Archivo de salida opcional para guardar los bytes decodificados.",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Activa modo debug para ver pasos intermedios de deteccion de ROI.",
+    )
     return parser
 
 
@@ -239,11 +274,17 @@ def main() -> None:
     if not cap.isOpened():
         raise RuntimeError(f"No se pudo abrir la camara {args.camera}")
 
+    # Reduce exposure to avoid saturation
+    cap.set(cv2.CAP_PROP_EXPOSURE, -20)  # Lower = darker; -15 is more aggressive
+    cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Only keep latest frame to prevent lag
+    
     decoded_bytes = bytearray()
     observed_symbols: deque[int] = deque(maxlen=len(SYNC_PREAMBLE))
     last_candidate: Optional[int] = None
     stable_count = 0
     last_roi: Optional[np.ndarray] = None
+    last_roi_size: Optional[int] = None
     use_manual_roi = False
     locked = False
     received_stream = bytearray()
@@ -251,8 +292,13 @@ def main() -> None:
     lock_text = ""
     last_emit_time = 0.0
     sample_period = args.symbol_ms / 1000.0
+    debug_mode = args.debug
+    roi_stable_frames = 0
 
-    print("Presiona 'm' para seleccionar ROI manual, 'q' o ESC para salir.")
+    print("Presiona 'm' para seleccionar ROI manual, 'd' para toggle debug, 'q' o ESC para salir.")
+    print("Nota: Exposición muy reducida. Cubre la cámara si aún está muy brillante.")
+
+
 
     try:
         while True:
@@ -265,11 +311,36 @@ def main() -> None:
 
             roi = None
             if not use_manual_roi:
-                roi = detect_screen_roi(frame)
-                if roi is not None:
-                    last_roi = roi
+                result = detect_screen_roi(frame, debug=debug_mode)
+                if result is not None:
+                    detected_roi, roi_size = result
+                    # Filtro de tamaño: si tenemos un ROI anterior, verifica que sea similar (±15%)
+                    if last_roi_size is None:
+                        # Primer ROI: acéptalo después de 3 frames estables
+                        roi_stable_frames += 1
+                        if roi_stable_frames >= 3:
+                            last_roi = detected_roi
+                            last_roi_size = roi_size
+                            roi_stable_frames = 0
+                        roi = detected_roi
+                    else:
+                        # Compara con tamaño anterior
+                        size_ratio = roi_size / last_roi_size
+                        if 0.85 <= size_ratio <= 1.15:  # ±15% de variación es aceptable
+                            roi_stable_frames += 1
+                            if roi_stable_frames >= 2:
+                                last_roi = detected_roi
+                                last_roi_size = roi_size
+                                roi_stable_frames = 0
+                            roi = detected_roi
+                        else:
+                            roi_stable_frames = 0
+                            roi = last_roi  # Rechaza este, usa el anterior
+                else:
+                    roi_stable_frames = 0
+                    roi = last_roi
 
-            if roi is None and last_roi is not None:
+            elif use_manual_roi and last_roi is not None:
                 roi = last_roi
 
             if roi is not None:
@@ -367,6 +438,9 @@ def main() -> None:
                 use_manual_roi = True
                 last_roi = manual_roi(frame)
                 print("ROI manual seleccionada.")
+            if key == ord("d"):
+                debug_mode = not debug_mode
+                print(f"Debug mode: {'ON' if debug_mode else 'OFF'}")
 
     finally:
         cap.release()

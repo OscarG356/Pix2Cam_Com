@@ -28,6 +28,8 @@ Puntos rapidos para subir la tasa de transmision:
 from __future__ import annotations
 
 import argparse
+import math
+import secrets
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Sequence
@@ -55,6 +57,7 @@ class FramePayload:
     index: int
     byte_value: int
     symbol_values: Sequence[int]
+    label: str = "data"
 
 
 def read_text_bytes(path: Path) -> bytes:
@@ -111,6 +114,31 @@ def encode_payload(data: bytes) -> List[FramePayload]:
             )
         )
     return frames
+
+
+def build_reference_frames(frame_count: int) -> List[FramePayload]:
+    """
+    Genera una referencia aleatoria antes de la transmisión real.
+
+    Esta fase no transporta información del mensaje: su objetivo es darle al
+    receptor una referencia visual estable para exposición, brillo y enfoque
+    antes de que aparezca el preámbulo.
+    """
+    if frame_count <= 0:
+        return []
+
+    reference_byte = secrets.randbits(8)
+    symbols = byte_to_symbols(reference_byte)
+    levels = symbols_to_levels(symbols)
+    return [
+        FramePayload(
+            index=i,
+            byte_value=reference_byte,
+            symbol_values=levels,
+            label="reference",
+        )
+        for i in range(frame_count)
+    ]
 
 
 def build_packet(data: bytes) -> bytes:
@@ -207,7 +235,17 @@ class TransmitterApp:
             outline="#404040",
             width=2,
         )
-        self.root.title(f"Emisor 2x2 | frame {frame.index + 1}/{len(self.frames)} | byte=0x{frame.byte_value:02X}")
+        if frame.label == "reference":
+            title = (
+                f"Emisor 2x2 | referencia {frame.index + 1}/{len(self.frames)} "
+                f"| byte=0x{frame.byte_value:02X}"
+            )
+        else:
+            title = (
+                f"Emisor 2x2 | frame {frame.index + 1}/{len(self.frames)} "
+                f"| byte=0x{frame.byte_value:02X}"
+            )
+        self.root.title(title)
 
     def _render_idle_screen(self) -> None:
         self.canvas.delete("all")
@@ -280,6 +318,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Tiempo que se mantiene la pantalla al terminar la transmision.",
     )
     parser.add_argument(
+        "--reference-ms",
+        type=int,
+        default=1000,
+        help="Tiempo de referencia aleatoria antes del preambulo.",
+    )
+    parser.add_argument(
         "--fullscreen",
         action="store_true",
         help="Mostrar en pantalla completa.",
@@ -301,10 +345,13 @@ def main() -> None:
         raise ValueError("--cell-px debe ser mayor que cero")
     if args.quiet_zone_px < 0:
         raise ValueError("--quiet-zone-px no puede ser negativo")
+    if args.reference_ms < 0:
+        raise ValueError("--reference-ms no puede ser negativo")
 
     data = read_text_bytes(args.text_file)
     packet = build_packet(data)
-    frames = encode_payload(packet)
+    reference_frame_count = 0 if args.reference_ms == 0 else max(1, math.ceil(args.reference_ms / args.frame_ms))
+    frames = build_reference_frames(reference_frame_count) + encode_payload(packet)
 
     # Si el archivo esta vacio, igual mostramos una pantalla estable para que el
     # usuario sepa que el programa esta vivo.

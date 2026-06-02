@@ -7,7 +7,7 @@ Transmite un bit a la vez:
 - BLANCO (1) = pantalla blanca
 
 Uso:
-    python3 src/tx_1x1.py archivo.txt [--frame-ms 1000]
+    python3 src/tx_1x1.py archivo.txt
 
 Controles:
     ENTER = iniciar transmisión
@@ -17,11 +17,12 @@ Controles:
 import argparse
 import cv2
 import numpy as np
+import time
 from pathlib import Path
 
 
 class Transmitter1x1:
-    def __init__(self, payload: bytes, frame_ms: int = 1000):
+    def __init__(self, payload: bytes, frame_ms: int = 20):
         self.payload = payload
         self.frame_ms = frame_ms
         self.transmitting = False
@@ -61,6 +62,30 @@ class Transmitter1x1:
     
     def _transmit(self):
         """Transmite todos los bits."""
+        # Primero enviar secuencia de sincronización visual: verde -> negro, repetido 3 veces
+        self._send_sync_sequence(repeats=3)
+
+    def _send_sync_sequence(self, repeats: int = 3):
+        """Muestra `repeats` veces: verde luego negro (cada uno `frame_ms` ms)."""
+        for i in range(repeats):
+            # Verde
+            img = np.zeros((1080, 1920, 3), dtype=np.uint8)
+            img[:] = (0, 255, 0)
+            cv2.putText(img, f"SYNC {i+1}/{repeats}", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 0), 3)
+            cv2.imshow('Emisor 1x1', img)
+            key = self._wait_for_frame(self.frame_ms)
+            if key in (27, ord('q')):
+                self.transmitting = False
+                return
+
+            # Negro
+            img = np.zeros((1080, 1920, 3), dtype=np.uint8)
+            cv2.putText(img, f"SYNC {i+1}/{repeats}", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 3)
+            cv2.imshow('Emisor 1x1', img)
+            key = self._wait_for_frame(self.frame_ms)
+            if key in (27, ord('q')):
+                self.transmitting = False
+                return
         while self.transmitting and self.bit_index < len(self.payload) * 8:
             # Extraer bit
             byte_idx = self.bit_index // 8
@@ -81,11 +106,25 @@ class Transmitter1x1:
             
             self.bit_index += 1
             
-            # Esperar frame_ms
-            key = cv2.waitKey(self.frame_ms) & 0xFF
+            # Esperar frame_ms con temporización precisa y procesando eventos
+            key = self._wait_for_frame(self.frame_ms)
             if key in (27, ord('q')):
                 self.transmitting = False
                 break
+
+    def _wait_for_frame(self, ms: int) -> int:
+        """Espera `ms` milisegundos usando time.perf_counter y llama a cv2.waitKey(1) para procesar eventos.
+
+        Devuelve la tecla si se pulsa, o 255 si no hubo tecla.
+        """
+        end = time.perf_counter() + ms / 1000.0
+        key = 255
+        while time.perf_counter() < end:
+            k = cv2.waitKey(1) & 0xFF
+            if k != 255:
+                key = k
+                break
+        return key
         
         # Mostrar FIN
         if self.bit_index >= len(self.payload) * 8:
@@ -101,16 +140,18 @@ class Transmitter1x1:
 
 def main():
     parser = argparse.ArgumentParser(description="Emisor 1x1")
-    parser.add_argument("file", type=Path, help="Archivo a transmitir")
-    parser.add_argument("--frame-ms", type=int, default=1000, help="Duración del frame en ms")
+    #parser.add_argument("file", type=Path, help="Archivo a transmitir")
+    #parser.add_argument("--frame-ms", type=int, default=1000, help="Duración del frame en ms")
     
     args = parser.parse_args()
-    
-    if not args.file.exists():
-        print(f"Error: {args.file} no existe")
+
+    mensaje_path = Path("mensaje.txt")
+
+    if not mensaje_path.is_file():
+        print(f"Error: mensaje.txt no existe")
         return
     
-    payload = args.file.read_bytes()
+    payload = mensaje_path.read_bytes()
     if not payload:
         print("Error: archivo vacío")
         return
@@ -119,13 +160,12 @@ def main():
     sync_preamble = bytes([0x55])  # 1 byte de patrón alternado = 7 transiciones
     full_payload = sync_preamble + payload
     
-    print(f"Transmitiendo: {args.file}")
+    print(f"Transmitiendo: mensaje.txt")
     print(f"Tamaño payload: {len(payload)} bytes")
     print(f"Con preamble: {len(full_payload)} bytes = {len(full_payload) * 8} bits")
     print(f"Preamble: 0x55 = 01010101 (7 transiciones)")
-    print(f"Duración esperada: {len(full_payload) * 8 * args.frame_ms / 1000:.1f}s")
     
-    tx = Transmitter1x1(full_payload, args.frame_ms)
+    tx = Transmitter1x1(full_payload, frame_ms=20)
     tx.run()
 
 

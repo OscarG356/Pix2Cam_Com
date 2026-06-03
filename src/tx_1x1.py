@@ -14,15 +14,18 @@ Controles:
     ESC/q = salir
 """
 
-import argparse
 import cv2
 import numpy as np
-import time
 from pathlib import Path
 
 
+# Cambia este valor para ajustar la velocidad de transmisión.
+# Menor = más rápido. Mayor = más lento.
+TX_FRAME_MS = 500
+
+
 class Transmitter1x1:
-    def __init__(self, payload: bytes, frame_ms: int = 20):
+    def __init__(self, payload: bytes, frame_ms: int = TX_FRAME_MS):
         self.payload = payload
         self.frame_ms = frame_ms
         self.transmitting = False
@@ -62,10 +65,43 @@ class Transmitter1x1:
     
     def _transmit(self):
         """Transmite todos los bits."""
-        # Primero enviar secuencia de sincronización visual: verde -> negro, repetido 3 veces
-        self._send_sync_sequence(repeats=3)
+        # Primero enviar secuencia de sincronización visual: verde -> negro (una vez)
+        self._send_sync_sequence(repeats=1)
 
-    def _send_sync_sequence(self, repeats: int = 3):
+        # Luego transmitir el payload bit a bit
+        while self.transmitting and self.bit_index < len(self.payload) * 8:
+            byte_idx = self.bit_index // 8
+            bit_in_byte = 7 - (self.bit_index % 8)
+            byte_val = self.payload[byte_idx]
+            bit = (byte_val >> bit_in_byte) & 1
+
+            color_val = 255 if bit else 0
+            img = np.full((1080, 1920, 3), color_val, dtype=np.uint8)
+
+            info_color = (0, 0, 0) if bit else (255, 255, 255)
+            progress = f"{self.bit_index + 1}/{len(self.payload) * 8}"
+            cv2.putText(img, progress, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.5, info_color, 2)
+
+            cv2.imshow('Emisor 1x1', img)
+
+            self.bit_index += 1
+
+            key = self._wait_for_frame(self.frame_ms)
+            if key in (27, ord('q')):
+                self.transmitting = False
+                break
+
+        if self.bit_index >= len(self.payload) * 8:
+            img = np.full((1080, 1920, 3), 128, dtype=np.uint8)
+            cv2.putText(img, "TRANSMISION COMPLETADA", (200, 400),
+                       cv2.FONT_HERSHEY_SIMPLEX, 3, (0, 255, 0), 4)
+            cv2.putText(img, "Presiona ENTER para otra", (200, 550),
+                       cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 3)
+            cv2.imshow('Emisor 1x1', img)
+
+        self.transmitting = False
+
+    def _send_sync_sequence(self, repeats: int = 1):
         """Muestra `repeats` veces: verde luego negro (cada uno `frame_ms` ms)."""
         for i in range(repeats):
             # Verde
@@ -86,65 +122,15 @@ class Transmitter1x1:
             if key in (27, ord('q')):
                 self.transmitting = False
                 return
-        while self.transmitting and self.bit_index < len(self.payload) * 8:
-            # Extraer bit
-            byte_idx = self.bit_index // 8
-            bit_in_byte = 7 - (self.bit_index % 8)
-            byte_val = self.payload[byte_idx]
-            bit = (byte_val >> bit_in_byte) & 1
-            
-            # Mostrar pantalla
-            color_val = 255 if bit else 0
-            img = np.full((1080, 1920, 3), color_val, dtype=np.uint8)
-            
-            # Mostrar info
-            info_color = (0, 0, 0) if bit else (255, 255, 255)
-            progress = f"{self.bit_index + 1}/{len(self.payload) * 8}"
-            cv2.putText(img, progress, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.5, info_color, 2)
-            
-            cv2.imshow('Emisor 1x1', img)
-            
-            self.bit_index += 1
-            
-            # Esperar frame_ms con temporización precisa y procesando eventos
-            key = self._wait_for_frame(self.frame_ms)
-            if key in (27, ord('q')):
-                self.transmitting = False
-                break
 
-    def _wait_for_frame(self, ms: int) -> int:
-        """Espera `ms` milisegundos usando time.perf_counter y llama a cv2.waitKey(1) para procesar eventos.
-
-        Devuelve la tecla si se pulsa, o 255 si no hubo tecla.
-        """
-        end = time.perf_counter() + ms / 1000.0
-        key = 255
-        while time.perf_counter() < end:
-            k = cv2.waitKey(1) & 0xFF
-            if k != 255:
-                key = k
-                break
-        return key
-        
-        # Mostrar FIN
-        if self.bit_index >= len(self.payload) * 8:
-            img = np.full((1080, 1920, 3), 128, dtype=np.uint8)
-            cv2.putText(img, "TRANSMISION COMPLETADA", (200, 400), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 3, (0, 255, 0), 4)
-            cv2.putText(img, "Presiona ENTER para otra", (200, 550), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 3)
-            cv2.imshow('Emisor 1x1', img)
-        
-        self.transmitting = False
+    def _wait_for_frame(self, ms: int | None = None) -> int:
+        """Espera `ms` milisegundos y devuelve la tecla pulsada, o 255 si no hubo tecla."""
+        if ms is None:
+            ms = self.frame_ms
+        return cv2.waitKey(ms) & 0xFF
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Emisor 1x1")
-    #parser.add_argument("file", type=Path, help="Archivo a transmitir")
-    #parser.add_argument("--frame-ms", type=int, default=1000, help="Duración del frame en ms")
-    
-    args = parser.parse_args()
-
     mensaje_path = Path("mensaje.txt")
 
     if not mensaje_path.is_file():
@@ -164,8 +150,9 @@ def main():
     print(f"Tamaño payload: {len(payload)} bytes")
     print(f"Con preamble: {len(full_payload)} bytes = {len(full_payload) * 8} bits")
     print(f"Preamble: 0x55 = 01010101 (7 transiciones)")
+    print(f"Duración por frame: {TX_FRAME_MS} ms")
     
-    tx = Transmitter1x1(full_payload, frame_ms=20)
+    tx = Transmitter1x1(full_payload, frame_ms=TX_FRAME_MS)
     tx.run()
 
 

@@ -21,9 +21,8 @@ CAMERA_INDEX = 0
 OUTPUT_PATH = Path("mensaje_recibido.txt")
 
 # Debe coincidir con el TX_FRAME_MS del emisor
-SAMPLE_INTERVAL_MS = 1016  
-# "Hola Mundo Colorido!" son 20 bytes. Ajusta según tu mensaje.
-EXPECTED_PAYLOAD_BYTES = 20  
+SAMPLE_INTERVAL_MS = 500
+EXPECTED_PAYLOAD_BYTES = 432
 
 # Mapeo de colores a símbolos (valores numéricos de 2 bits)
 COLOR_TO_SYMBOL = {
@@ -33,7 +32,7 @@ COLOR_TO_SYMBOL = {
     "YELLOW": 3  # 11
 }
 
-def detect_dominant_color(frame_bgr: np.ndarray) -> str:
+def detect_dominant_color(frame_bgr: np.ndarray) -> tuple[str, float]:
     """
     Analiza el centro del frame en espacio HSV para determinar el color dominante.
     Retorna "BLACK", "RED", "BLUE", "GREEN", "YELLOW" o "UNKNOWN".
@@ -77,11 +76,12 @@ def detect_dominant_color(frame_bgr: np.ndarray) -> str:
     # Encontrar el color con mayor porcentaje de coincidencia
     best_color = max(scores, key=scores.get)
     
-    # Si el mejor color ocupa más del 30% de nuestra región central, lo aceptamos
-    if scores[best_color] > 0.30:
-        return best_color
-        
-    return "UNKNOWN"
+    # Devolver el mejor color y su fracción (permitimos decidir fuera de la función)
+    best_score = scores[best_color]
+    if best_score > 0.0:
+        return best_color, best_score
+
+    return "UNKNOWN", 0.0
 
 def bits_to_byte(bits: list[int]) -> int:
     """Convierte 8 bits a un byte (MSB primero)."""
@@ -107,9 +107,14 @@ def main():
     sample_count = 0
     start_time = time.monotonic()
     
-    # Tiempos para detectar sync sostenido
-    red_since: Optional[float] = None
-    black_since: Optional[float] = None
+    # Contadores para detectar sync por frames consecutivos
+    SYNC_RED_FRAMES = 2
+    SYNC_BLACK_FRAMES = 2
+    COLOR_ACCEPT_THRESHOLD = 0.15
+
+    red_count = 0
+    black_count = 0
+    red_locked = False
     
     try:
         while True:
@@ -118,41 +123,54 @@ def main():
                 continue
             
             current_time = time.monotonic()
-            detected_color = detect_dominant_color(frame)
+            detected_color, detected_score = detect_dominant_color(frame)
             
             # ===== FASE 1: SINCRONIZACIÓN POR FLAG ROJO -> NEGRO =====
             if not synced:
-                sample_interval_s = SAMPLE_INTERVAL_MS / 1000.0
-                
-                if detected_color == "RED":
-                    if red_since is None:
-                        red_since = current_time
-                    black_since = None
-                else:
-                    if red_since is None or (current_time - red_since) < sample_interval_s:
-                        red_since = None
+                if detected_color == "RED" and detected_score >= COLOR_ACCEPT_THRESHOLD:
+                    red_count += 1
+                    black_count = 0
+                elif detected_color == "BLACK" and detected_score >= COLOR_ACCEPT_THRESHOLD:
+                    if red_count >= SYNC_RED_FRAMES:
+                        black_count += 1
                     else:
-                        if detected_color == "BLACK":
-                            if black_since is None:
-                                black_since = current_time
-                            elif (current_time - black_since) >= sample_interval_s:
-                                # ¡Sincronizado!
-                                synced = True
-                                print(f"[SYNCED] Secuencia ROJO->NEGRO detectada.")
-                                # Comenzar a muestrear en el centro del siguiente fotograma
-                                post_sync_wait = 0.2
-                                next_sample_time = current_time + post_sync_wait + (sample_interval_s / 2)
-                                red_since, black_since = None, None
-                        else:
-                            black_since = None
-            
+                        red_count = 0
+                        black_count = 0
+                else:
+                    if not red_locked:
+                        red_count = 0
+                    black_count = 0
+
+                if red_count >= SYNC_RED_FRAMES and black_count >= SYNC_BLACK_FRAMES:
+                    synced = True
+                    print(f"[SYNCED] Secuencia ROJO->NEGRO detectada.")
+                    
+                    # --- CORRECCIÓN DE TIMING ---
+                    sample_interval_s = SAMPLE_INTERVAL_MS / 1000.0
+                    
+                    # Estimamos cuántos ms de NEGRO ya se consumieron en la cámara
+                    # (Aproximadamente: black_count * tiempo_de_un_frame_de_camara)
+                    # Asumiendo una webcam estándar de 30fps (~33ms por frame):
+                    tiempo_consumido_negro = black_count * 0.033
+                    
+                    # El tiempo que le queda al frame NEGRO actual para terminar es:
+                    tiempo_restante_negro = max(0.0, sample_interval_s - tiempo_consumido_negro)
+                    
+                    # Queremos saltar lo que le queda al NEGRO + la MITAD del primer frame de datos
+                    next_sample_time = current_time + tiempo_restante_negro + (sample_interval_s / 2)
+                    
+                    print(f"[TIMING] Primer muestreo programado en +{(tiempo_restante_negro + (sample_interval_s / 2))*1000:.0f}ms")
+                    
+                    red_count = 0
+                    black_count = 0
+
             # ===== FASE 2: DECODIFICACIÓN DE 2 BITS POR FRAME =====
             elif synced:
                 sample_interval_s = SAMPLE_INTERVAL_MS / 1000.0
 
                 if current_time >= next_sample_time:
                     # Traducir el color leído a su valor numérico de símbolo
-                    symbol = COLOR_TO_SYMBOL.get(detected_color, 0) # Por defecto a negro si hay duda
+                    symbol = COLOR_TO_SYMBOL.get(detected_color, 0)  # Por defecto a negro si hay duda
                     
                     # Extraer los 2 bits del símbolo (MSB primero)
                     bit1 = (symbol >> 1) & 1
@@ -161,7 +179,7 @@ def main():
                     collected_bits.extend([bit1, bit2])
                     sample_count += 1
                     
-                    print(f"Frame {sample_count}: Color {detected_color} -> Simbolo {symbol} (Bits: {bit1}{bit2})")
+                    print(f"Frame {sample_count}: Color {detected_color} ({detected_score:.2f}) -> Simbolo {symbol} (Bits: {bit1}{bit2})")
                     
                     # Si completamos un byte (8 bits)
                     if len(collected_bits) >= 8:
@@ -189,12 +207,12 @@ def main():
             cv2.rectangle(display, (w//4, h//4), (3*w//4, 3*h//4), (255, 255, 255), 2)
 
             if not synced:
-                status_lines = ["Buscando Sync (ROJO -> NEGRO)", f"Color actual: {detected_color}"]
+                status_lines = ["Buscando Sync (ROJO -> NEGRO)", f"Color actual: {detected_color} {f'({detected_score:.2f})' if isinstance(detected_score, float) else ''}"]
             else:
                 bits_str = ''.join(str(b) for b in collected_bits)
                 status_lines = [
                     f"SYNCED - Leyendo Data",
-                    f"Color: {detected_color}",
+                    f"Color: {detected_color} {f'({detected_score:.2f})' if isinstance(detected_score, float) else ''}",
                     f"Bits en buffer: {bits_str}",
                     f"Bytes recibidos: {len(received_payload)}/{EXPECTED_PAYLOAD_BYTES}"
                 ]

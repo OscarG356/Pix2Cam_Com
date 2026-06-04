@@ -13,29 +13,31 @@ def calcular_ber(ruta_original, ruta_recibido):
     """
     
     try:
-        # Leer los archivos
-        with open(ruta_original, 'r') as f:
-            mensaje_original = f.read()
-        
-        with open(ruta_recibido, 'r') as f:
-            mensaje_recibido = f.read()
-        
-        # Convertir a bits
-        bits_original = ''.join(format(ord(c), '08b') for c in mensaje_original)
-        bits_recibido = ''.join(format(ord(c), '08b') for c in mensaje_recibido)
-        
-        # Asegurar que tienen la misma longitud
-        max_len = max(len(bits_original), len(bits_recibido))
-        bits_original = bits_original.ljust(max_len, '0')
-        bits_recibido = bits_recibido.ljust(max_len, '0')
-        
-        # Contar bits errados
-        bits_error = sum(b1 != b2 for b1, b2 in zip(bits_original, bits_recibido))
-        
-        # Calcular BER
-        ber = bits_error / max_len if max_len > 0 else 0
-        
-        return ber, bits_error, max_len
+        # Leer los archivos en binario para evitar problemas de encoding
+        with open(ruta_original, 'rb') as f:
+            data_original = f.read()
+
+        with open(ruta_recibido, 'rb') as f:
+            data_recibido = f.read()
+
+        # Convertir a secuencias de bytes y comparar bit a bit
+        len_orig = len(data_original)
+        len_rec = len(data_recibido)
+        max_len_bytes = max(len_orig, len_rec)
+
+        bits_error = 0
+        total_bits = max_len_bytes * 8
+
+        # Comparar byte a byte para las posiciones existentes
+        for i in range(max_len_bytes):
+            b_orig = data_original[i] if i < len_orig else 0
+            b_rec = data_recibido[i] if i < len_rec else 0
+            # XOR y contar bits distintos
+            diff = b_orig ^ b_rec
+            bits_error += bin(diff).count('1')
+
+        ber = bits_error / total_bits if total_bits > 0 else 0
+        return ber, bits_error, total_bits
     
     except FileNotFoundError as e:
         print(f"Error: Archivo no encontrado - {e}")

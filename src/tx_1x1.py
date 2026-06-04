@@ -21,7 +21,7 @@ from pathlib import Path
 
 # Cambia este valor para ajustar la velocidad de transmisión.
 # Menor = más rápido. Mayor = más lento.
-TX_FRAME_MS = 500
+TX_FRAME_MS = 1016
 
 
 class Transmitter1x1:

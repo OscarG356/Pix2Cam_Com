@@ -23,7 +23,7 @@ CAMERA_INDEX = 0
 OUTPUT_PATH = Path("mensaje_recibido.txt")
 SYNC_CYCLES = 1
 # Flag de inicio: un frame verde y luego uno negro
-SAMPLE_INTERVAL_MS = 500  # Cambia este valor para modificar el periodo de muestreo
+SAMPLE_INTERVAL_MS = 1000  # Cambia este valor para modificar el periodo de muestreo
 EXPECTED_PAYLOAD_BYTES = 24
 
 
@@ -100,6 +100,7 @@ def main():
     
     # Estado de decodificación
     collected_bits = []
+    all_received_bits: list[int] = []
     collected_bytes = bytearray()
     next_sample_time = 0.0
     sample_count = 0
@@ -167,6 +168,7 @@ def main():
                     if current_time >= next_sample_time:
                         time_since_sample = current_time - (next_sample_time - sample_interval_s)
                         collected_bits.append(detected_bit)
+                        all_received_bits.append(detected_bit)
                         sample_count += 1
                         
                         print(f"Bit {len(collected_bits)}: {detected_bit} (t={time_since_sample*1000:.1f}ms)")

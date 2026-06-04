@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 # Velocidad de transmisión ajustada por el usuario (534ms)
-TX_FRAME_MS = 500
+TX_FRAME_MS = 150
 
 # Mapa de colores en formato BGR de OpenCV
 # 00 -> Negro, 01 -> Azul, 10 -> Verde, 11 -> Amarillo

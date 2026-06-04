@@ -21,8 +21,8 @@ CAMERA_INDEX = 0
 OUTPUT_PATH = Path("mensaje_recibido.txt")
 
 # Debe coincidir con el TX_FRAME_MS del emisor
-SAMPLE_INTERVAL_MS = 500
-EXPECTED_PAYLOAD_BYTES = 432
+SAMPLE_INTERVAL_MS = 150
+EXPECTED_PAYLOAD_BYTES = 55
 
 # Mapeo de colores a símbolos (valores numéricos de 2 bits)
 COLOR_TO_SYMBOL = {
@@ -230,7 +230,9 @@ def main():
         cv2.destroyAllWindows()
         
         if received_payload:
-            msg = received_payload.decode('utf-8', errors='replace')
+            preamble = received_payload[0]
+            msg = received_payload[1:].decode('utf-8', errors='replace')
+            #msg = received_payload.decode('utf-8', errors='replace')
             print(f"\n=== MENSAJE RECIBIDO ({len(received_payload)} bytes) ===")
             print(msg)
             print("=====================\n")

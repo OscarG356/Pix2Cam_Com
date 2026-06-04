@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
 Emisor 1x1 usando OpenCV - Modulación por Color (4 colores = 2 bits/símbolo)
+Con sincronización de tiempo absoluta para evitar desfases con el receptor.
 """
 
 import cv2
 import numpy as np
+import time
 from pathlib import Path
 
-TX_FRAME_MS = 1016
+# Velocidad de transmisión ajustada por el usuario (534ms)
+TX_FRAME_MS = 500
 
 # Mapa de colores en formato BGR de OpenCV
 # 00 -> Negro, 01 -> Azul, 10 -> Verde, 11 -> Amarillo
@@ -24,7 +27,7 @@ class Transmitter1x1Color:
         self.frame_ms = frame_ms
         self.transmitting = False
         self.bit_index = 0
-        self.bits_per_symbol = 2  # Usamos 2 bits porque tenemos 4 colores
+        self.bits_per_symbol = 2  
         self.color_map = COLOR_MAP_4
     
     def run(self):
@@ -58,13 +61,17 @@ class Transmitter1x1Color:
         cv2.imshow('Emisor 1x1', img)
     
     def _transmit(self):
-        # Secuencia de sincronización: Usamos ROJO puro para distinguirlo de los datos
+        # Secuencia de sincronización inicial (Rojo -> Negro)
         self._send_sync_sequence(repeats=1)
 
         total_bits = len(self.payload) * 8
+        
+        # --- CONTROL DE TIEMPO REAL ---
+        # Guardamos el instante exacto en el que empiezan a transmitirse los datos reales
+        start_time = time.monotonic()
+        frames_sent = 0
 
         while self.transmitting and self.bit_index < total_bits:
-            # Extraer los próximos 'bits_per_symbol' bits
             symbol_val = 0
             bits_to_read = min(self.bits_per_symbol, total_bits - self.bit_index)
             
@@ -73,19 +80,14 @@ class Transmitter1x1Color:
                 byte_idx = current_bit_pos // 8
                 bit_in_byte = 7 - (current_bit_pos % 8)
                 bit = (self.payload[byte_idx] >> bit_in_byte) & 1
-                # Desplazar y añadir el bit leído
                 symbol_val = (symbol_val << 1) | bit
             
-            # Si al final del archivo sobran bits impares, desplazamos para alinear
             if bits_to_read < self.bits_per_symbol:
                 symbol_val = symbol_val << (self.bits_per_symbol - bits_to_read)
 
-            # Obtener el color del diccionario
             color_val = self.color_map[symbol_val]
             img = np.full((1080, 1920, 3), color_val, dtype=np.uint8)
 
-            # Para que el texto sea visible, invertimos el color de fondo o usamos gris
-            # Calcular la luminancia básica para decidir color de texto
             luminancia = 0.114*color_val[0] + 0.587*color_val[1] + 0.299*color_val[2]
             info_color = (0, 0, 0) if luminancia > 128 else (255, 255, 255)
             
@@ -95,8 +97,14 @@ class Transmitter1x1Color:
             cv2.imshow('Emisor 1x1', img)
 
             self.bit_index += bits_to_read
+            frames_sent += 1
 
-            key = self._wait_for_frame(self.frame_ms)
+            # CALCULAR EL TIEMPO OBJETIVO MATEMÁTICO
+            # frame_ms se pasa a segundos (/1000.0) y se multiplica por los frames que ya deberíamos haber mandado
+            target_time = start_time + (frames_sent * (self.frame_ms / 1000.0))
+            
+            # Esperar de forma adaptativa hasta llegar a ese instante exacto
+            key = self._wait_until(target_time)
             if key in (27, ord('q')):
                 self.transmitting = False
                 break
@@ -110,13 +118,14 @@ class Transmitter1x1Color:
         self.transmitting = False
 
     def _send_sync_sequence(self, repeats: int = 1):
+        """Envía la secuencia de sincronización usando el reloj antiguo ya que es previa al flujo principal."""
         for i in range(repeats):
-            # Rojo (Fuera de banda de datos)
+            # Rojo
             img = np.zeros((1080, 1920, 3), dtype=np.uint8)
             img[:] = (0, 0, 255) 
             cv2.putText(img, f"SYNC {i+1}/{repeats}", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 3)
             cv2.imshow('Emisor 1x1', img)
-            key = self._wait_for_frame(self.frame_ms)
+            key = cv2.waitKey(self.frame_ms) & 0xFF
             if key in (27, ord('q')):
                 self.transmitting = False
                 return
@@ -125,32 +134,36 @@ class Transmitter1x1Color:
             img = np.zeros((1080, 1920, 3), dtype=np.uint8)
             cv2.putText(img, f"SYNC {i+1}/{repeats}", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 3)
             cv2.imshow('Emisor 1x1', img)
-            key = self._wait_for_frame(self.frame_ms)
+            key = cv2.waitKey(self.frame_ms) & 0xFF
             if key in (27, ord('q')):
                 self.transmitting = False
                 return
 
-    def _wait_for_frame(self, ms: int | None = None) -> int:
-        if ms is None:
-            ms = self.frame_ms
-        return cv2.waitKey(ms) & 0xFF
+    def _wait_until(self, target_time: float) -> int:
+        """Sloops pequeños de 1ms para mantener la ventana de OpenCV activa sin pasarse del tiempo objetivo."""
+        while time.monotonic() < target_time:
+            key = cv2.waitKey(1) & 0xFF
+            if key != 255:
+                return key
+        return 255
 
 def main():
     mensaje_path = Path("mensaje.txt")
 
     if not mensaje_path.is_file():
-        # Crear un archivo de prueba si no existe
-        mensaje_path.write_text("Hola Mundo Colorido!")
+        mensaje_path.write_text("hola amigos de youtube")
     
     payload = mensaje_path.read_bytes()
     if not payload:
         print("Error: archivo vacío")
         return
     
-    # Preámbulo de sincronización: 0x55
+    # NOTA: Si dejas el sync_preamble activo, recuerda configurar tu 
+    # receptor con EXPECTED_PAYLOAD_BYTES = len(mensaje) + 1
     sync_preamble = bytes([0x55])
     full_payload = sync_preamble + payload
     
+    print(f"Transmitiendo con precisión absoluta... Tamaño total: {len(full_payload)} bytes")
     tx = Transmitter1x1Color(full_payload, frame_ms=TX_FRAME_MS)
     tx.run()
 

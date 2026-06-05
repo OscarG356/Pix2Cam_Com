@@ -9,7 +9,7 @@ import numpy as np
 import time
 from pathlib import Path
 
-TX_FRAME_MS = 150
+TX_FRAME_MS = 100
 
 class Transmitter4x4BW:
     def __init__(self, payload: bytes, frame_ms: int = TX_FRAME_MS):

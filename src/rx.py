@@ -11,7 +11,7 @@ from pathlib import Path
 
 CAMERA_INDEX = 0
 OUTPUT_PATH = Path("mensaje_recibido.txt")
-SAMPLE_INTERVAL_MS = 150  
+SAMPLE_INTERVAL_MS = 100  
 EXPECTED_PAYLOAD_BYTES = 502
 
 def order_points(pts):
@@ -131,7 +131,7 @@ def main():
         cap.release(); cv2.destroyAllWindows()
         if received_payload:
             # Quitamos los 2 bytes de preámbulo (0x55, 0x55)
-            clean_payload = received_payload[2:]
+            clean_payload = received_payload[4:]
             msg = clean_payload.decode('utf-8', errors='ignore')
             
             print(f"\n=== MENSAJE DECODIFICADO (4x4) ===\n{msg}\n==================================")

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Receptor 4x4 (Blanco y Negro) - 2 Bytes por Frame.
-Usa tracking de un marco Verde Neón y umbralización de escala de grises.
+Receptor 8x4 Color - 8 Bytes por Frame.
+Decodifica Negro (00), Verde (01), Rojo (10) y Blanco (11) usando HSV.
 """
 
 import cv2
@@ -12,7 +12,7 @@ from pathlib import Path
 CAMERA_INDEX = 0
 OUTPUT_PATH = Path("mensaje_recibido.txt")
 SAMPLE_INTERVAL_MS = 100  
-EXPECTED_PAYLOAD_BYTES = 502
+EXPECTED_PAYLOAD_BYTES = 504 # Ajustado a múltiplo de 8
 
 def order_points(pts):
     rect = np.zeros((4, 2), dtype="float32")
@@ -24,6 +24,17 @@ def order_points(pts):
     rect[3] = pts[np.argmax(diff)]
     return rect
 
+def decode_hsv_to_bits(h, s, v):
+    """Clasifica los promedios HSV de una celda en 2 bits."""
+    if s < 60 and v > 150:
+        return [1, 1]  # Blanco
+    if v < 55:
+        return [0, 0]  # Negro
+    if 35 <= h <= 95:
+        return [0, 1]  # Verde
+    else:
+        return [1, 0]  # Rojo
+
 def main():
     cap = cv2.VideoCapture(CAMERA_INDEX)
     if not cap.isOpened(): return
@@ -33,7 +44,6 @@ def main():
     next_sample_time = 0.0
     sync_whites, sync_blacks = 0, 0
     
-    # El nuevo marco rojo aplanado es RECTANGULAR (1840 de ancho x 1040 de alto)
     dst_pts = np.array([[0,0], [1840,0], [1840,1040], [0,1040]], dtype="float32")
     
     try:
@@ -47,7 +57,6 @@ def main():
             # --- 1. LOCALIZAR EL MARCO ROJO EN HSV ---
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
             
-            # Rango estricto para Rojo brillante
             mask_red1 = cv2.inRange(hsv, (0, 100, 100), (10, 255, 255))
             mask_red2 = cv2.inRange(hsv, (160, 100, 100), (179, 255, 255))
             mask_red = cv2.bitwise_or(mask_red1, mask_red2)
@@ -69,53 +78,54 @@ def main():
                 # --- 2. ENDEREZAR LA PERSPECTIVA ---
                 pts = order_points(screen_contour.reshape(4, 2))
                 M = cv2.getPerspectiveTransform(pts, dst_pts)
-                warped = cv2.warpPerspective(frame, M, (1840, 1040)) # <-- Rectángulo ancho
-                warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+                warped = cv2.warpPerspective(frame, M, (1840, 1040))
+                warped_hsv = cv2.cvtColor(warped, cv2.COLOR_BGR2HSV)
                 
-                # --- 3. EXTRAER LOS 32 BITS ---
+                # --- 3. EXTRAER LOS 64 BITS (32 CELDAS * 2 BITS) ---
                 bits_read = []
                 for i in range(32):
-                    row = i // 8  # 8 columnas
+                    row = i // 8  
                     col = i % 8
                     
-                    # El offset sigue siendo 120 (40 de rojo + 80 de foso negro)
-                    y1 = 120 + (row * 200) + 50
-                    y2 = 120 + (row * 200) + 150
-                    x1 = 120 + (col * 200) + 50
-                    x2 = 120 + (col * 200) + 150
+                    y1 = 120 + (row * 200) + 60
+                    y2 = 120 + (row * 200) + 140
+                    x1 = 120 + (col * 200) + 60
+                    x2 = 120 + (col * 200) + 140
                     
-                    cell_roi = warped_gray[y1:y2, x1:x2]
-                    mean_val = np.mean(cell_roi)
-                    bits_read.append(1 if mean_val > 120 else 0)
+                    cell_roi = warped_hsv[y1:y2, x1:x2]
+                    mean_hsv = np.mean(cell_roi, axis=(0, 1)) # [H, S, V] promedios
+                    
+                    bits = decode_hsv_to_bits(mean_hsv[0], mean_hsv[1], mean_hsv[2])
+                    bits_read.extend(bits)
 
                 # --- 4. LÓGICA DE SINCRONIZACIÓN Y DECODIFICACIÓN ---
+                # Contamos cuántos bits son '1' para la sincronización (Frame blanco = 64 unos)
                 sum_bits = sum(bits_read)
                 
                 if not synced:
-                    if sum_bits >= 30: # Tolerancia de 2 bits de error en Blanco
+                    if sum_bits >= 60: # Tolerancia en Blanco
                         sync_whites += 1; sync_blacks = 0
-                    elif sum_bits <= 2: # Tolerancia de 2 bits de error en Negro
+                    elif sum_bits <= 4: # Tolerancia en Negro
                         if sync_whites >= 1: sync_blacks += 1
                     else:
                         sync_blacks = 0
 
                     if sync_whites >= 1 and sync_blacks >= 1:
                         synced = True
-                        print("[SYNCED] 8x4 Enganchado!")
+                        print("[SYNCED] ¡Enganchado a Color (8x4)!")
                         next_sample_time = current_time + (SAMPLE_INTERVAL_MS / 1000.0)
                         
                 elif synced and current_time >= next_sample_time:
-                    # Reconstruir 4 Bytes
-                    word32 = 0
-                    for i in range(32):
-                        word32 |= (bits_read[i] << (31 - i))
+                    # Reconstruir 8 Bytes (64 bits)
+                    frame_bytes = bytearray()
+                    for b in range(8):
+                        byte_val = 0
+                        for bit_idx in range(8):
+                            total_bit_idx = b * 8 + bit_idx
+                            byte_val |= (bits_read[total_bit_idx] << (7 - bit_idx))
+                        frame_bytes.append(byte_val)
                     
-                    byte1 = (word32 >> 24) & 0xFF
-                    byte2 = (word32 >> 16) & 0xFF
-                    byte3 = (word32 >> 8) & 0xFF
-                    byte4 = word32 & 0xFF
-                    
-                    received_payload.extend([byte1, byte2, byte3, byte4])
+                    received_payload.extend(frame_bytes)
                     print(f"Recibidos {len(received_payload)} bytes...")
                     
                     if len(received_payload) >= EXPECTED_PAYLOAD_BYTES: break
@@ -124,17 +134,17 @@ def main():
             else:
                 cv2.putText(display, "Buscando Marco Rojo...", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
                 
-            cv2.imshow("Receptor 4x4", display)
+            cv2.imshow("Receptor 4x4 Color", display)
             if cv2.waitKey(1) & 0xFF in (27, ord('q')): break
 
     finally:
         cap.release(); cv2.destroyAllWindows()
         if received_payload:
-            # Quitamos los 2 bytes de preámbulo (0x55, 0x55)
-            clean_payload = received_payload[4:]
+            # Quitamos los 8 bytes de preámbulo (0x55 * 8)
+            clean_payload = received_payload[8:]
             msg = clean_payload.decode('utf-8', errors='ignore')
             
-            print(f"\n=== MENSAJE DECODIFICADO (4x4) ===\n{msg}\n==================================")
+            print(f"\n=== MENSAJE DECODIFICADO COLOR ===\n{msg}\n==================================")
             OUTPUT_PATH.write_bytes(clean_payload)
 
 if __name__ == "__main__":

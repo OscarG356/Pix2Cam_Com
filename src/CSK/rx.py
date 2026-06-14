@@ -11,8 +11,8 @@ from pathlib import Path
 
 CAMERA_INDEX = 0
 OUTPUT_PATH = Path("mensaje_recibido.txt")
-SAMPLE_INTERVAL_MS = 100  
-EXPECTED_PAYLOAD_BYTES = 504 # Ajustado a múltiplo de 8
+SAMPLE_INTERVAL_MS = 100
+EXPECTED_PAYLOAD_BYTES = 512 # 8 bytes preámbulo + 498 texto + 6 bytes padding
 
 def order_points(pts):
     rect = np.zeros((4, 2), dtype="float32")
@@ -83,6 +83,7 @@ def main():
                 
                 # --- 3. EXTRAER LOS 64 BITS (32 CELDAS * 2 BITS) ---
                 bits_read = []
+                total_v = 0
                 for i in range(32):
                     row = i // 8  
                     col = i % 8
@@ -94,18 +95,18 @@ def main():
                     
                     cell_roi = warped_hsv[y1:y2, x1:x2]
                     mean_hsv = np.mean(cell_roi, axis=(0, 1)) # [H, S, V] promedios
+                    total_v += mean_hsv[2] # Acumulamos el Valor (Brillo)
                     
                     bits = decode_hsv_to_bits(mean_hsv[0], mean_hsv[1], mean_hsv[2])
                     bits_read.extend(bits)
 
                 # --- 4. LÓGICA DE SINCRONIZACIÓN Y DECODIFICACIÓN ---
-                # Contamos cuántos bits son '1' para la sincronización (Frame blanco = 64 unos)
-                sum_bits = sum(bits_read)
+                avg_v = total_v / 32 # Brillo promedio de la matriz
                 
                 if not synced:
-                    if sum_bits >= 60: # Tolerancia en Blanco
+                    if avg_v > 180: # Detectamos frame Brillante (Blanco de Sync)
                         sync_whites += 1; sync_blacks = 0
-                    elif sum_bits <= 4: # Tolerancia en Negro
+                    elif avg_v < 60: # Detectamos frame Oscuro (Negro de Sync)
                         if sync_whites >= 1: sync_blacks += 1
                     else:
                         sync_blacks = 0
@@ -134,7 +135,7 @@ def main():
             else:
                 cv2.putText(display, "Buscando Marco Rojo...", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
                 
-            cv2.imshow("Receptor 4x4 Color", display)
+            cv2.imshow("Receptor 8x4 Color", display)
             if cv2.waitKey(1) & 0xFF in (27, ord('q')): break
 
     finally:

@@ -9,7 +9,7 @@ import numpy as np
 import time
 from pathlib import Path
 
-TX_FRAME_MS = 100
+TX_FRAME_MS = 200
 
 class Transmitter8x4Color:
     def __init__(self, payload: bytes, frame_ms: int = TX_FRAME_MS):
@@ -73,7 +73,10 @@ class Transmitter8x4Color:
         return img
 
     def _transmit(self):
-        self._send_sync_sequence()
+        if not self._send_sync_sequence():
+            self.transmitting = False
+            return
+            
         start_time = time.monotonic()
         frames_sent = 0
 
@@ -108,14 +111,21 @@ class Transmitter8x4Color:
         self.transmitting = False
 
     def _send_sync_sequence(self):
-        # Sincronización: Todo Blanco (val 3) seguido de Todo Negro (val 0)
-        img = self._draw_matrix([3] * 32)
-        cv2.imshow('Emisor 8x4 Color', img)
-        if self._wait_until(time.monotonic() + self.frame_ms/1000.0) != 255: return
+        """Secuencia: Blanco (Estabilización) -> Verde (Disparo)."""
+        # 1. Blanco por 600ms (3 frames) para estabilizar brillo de la cámara
+        for _ in range(3):
+            img = self._draw_matrix([3] * 32)
+            cv2.imshow('Emisor 8x4 Color', img)
+            if self._wait_until(time.monotonic() + self.frame_ms/1000.0) != 255: 
+                return False
         
-        img = self._draw_matrix([0] * 32)
+        # 2. Verde por 200ms (1 frame) - Es el Trigger
+        img = self._draw_matrix([1] * 32)
         cv2.imshow('Emisor 8x4 Color', img)
-        if self._wait_until(time.monotonic() + self.frame_ms/1000.0) != 255: return
+        if self._wait_until(time.monotonic() + self.frame_ms/1000.0) != 255: 
+            return False
+            
+        return True
 
     def _wait_until(self, target_time: float) -> int:
         while time.monotonic() < target_time:

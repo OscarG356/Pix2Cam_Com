@@ -11,7 +11,7 @@ from pathlib import Path
 
 CAMERA_INDEX = 0
 OUTPUT_PATH = Path("mensaje_recibido.txt")
-SAMPLE_INTERVAL_MS = 100
+SAMPLE_INTERVAL_MS = 200
 EXPECTED_PAYLOAD_BYTES = 512 # 8 bytes preámbulo + 498 texto + 6 bytes padding
 
 def order_points(pts):
@@ -42,7 +42,7 @@ def main():
     synced = False
     received_payload = bytearray()
     next_sample_time = 0.0
-    sync_whites, sync_blacks = 0, 0
+    sync_whites, sync_greens = 0, 0
     
     dst_pts = np.array([[0,0], [1840,0], [1840,1040], [0,1040]], dtype="float32")
     

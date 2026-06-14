@@ -73,7 +73,10 @@ class Transmitter8x4Color:
         return img
 
     def _transmit(self):
-        self._send_sync_sequence()
+        if not self._send_sync_sequence():
+            self.transmitting = False
+            return
+            
         start_time = time.monotonic()
         frames_sent = 0
 
@@ -108,14 +111,24 @@ class Transmitter8x4Color:
         self.transmitting = False
 
     def _send_sync_sequence(self):
-        # Sincronización: Todo Blanco (val 3) seguido de Todo Negro (val 0)
-        img = self._draw_matrix([3] * 32)
-        cv2.imshow('Emisor 8x4 Color', img)
-        if self._wait_until(time.monotonic() + self.frame_ms/1000.0) != 255: return
+        """Secuencia adaptada: Preparación (Negro) -> Estabilización (Blanco) -> Disparo (Negro)."""
+        # 1. Preparación (500ms): Permite al RX encontrar el marco rojo y ajustar AE/AWB
+        for _ in range(5):
+            img = self._draw_matrix([0] * 32)
+            cv2.imshow('Emisor 8x4 Color', img)
+            if self._wait_until(time.monotonic() + self.frame_ms/1000.0) != 255: return False
+            
+        # 2. Sincronización Blanco (500ms): Asegura que el RX vea el estado 'sync_whites'
+        for _ in range(5):
+            img = self._draw_matrix([3] * 32)
+            cv2.imshow('Emisor 8x4 Color', img)
+            if self._wait_until(time.monotonic() + self.frame_ms/1000.0) != 255: return False
         
-        img = self._draw_matrix([0] * 32)
+        # 3. Disparo VERDE (100ms): Actúa como trigger de inicio para el receptor
+        img = self._draw_matrix([1] * 32)
         cv2.imshow('Emisor 8x4 Color', img)
-        if self._wait_until(time.monotonic() + self.frame_ms/1000.0) != 255: return
+        if self._wait_until(time.monotonic() + self.frame_ms/1000.0) != 255: return False
+        return True
 
     def _wait_until(self, target_time: float) -> int:
         while time.monotonic() < target_time:

@@ -42,7 +42,7 @@ def main():
     synced = False
     received_payload = bytearray()
     next_sample_time = 0.0
-    sync_whites, sync_blacks = 0, 0
+    sync_whites, sync_greens = 0, 0
     
     dst_pts = np.array([[0,0], [1840,0], [1840,1040], [0,1040]], dtype="float32")
     

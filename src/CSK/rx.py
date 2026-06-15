@@ -14,6 +14,11 @@ OUTPUT_PATH = Path("mensaje_recibido.txt")
 SAMPLE_INTERVAL_MS = 200
 EXPECTED_PAYLOAD_BYTES = 512 # 8 bytes preámbulo + 498 texto + 6 bytes padding
 
+# Umbrales BGR para decodificación
+BGR_WHITE_THR = 180
+BGR_BLACK_THR = 80
+BGR_DIFF_COLOR = 40
+
 def order_points(pts):
     rect = np.zeros((4, 2), dtype="float32")
     s = pts.sum(axis=1)
@@ -24,16 +29,18 @@ def order_points(pts):
     rect[3] = pts[np.argmax(diff)]
     return rect
 
-def decode_hsv_to_bits(h, s, v):
-    """Clasifica los promedios HSV de una celda en 2 bits."""
-    if s < 60 and v > 150:
-        return [1, 1]  # Blanco
-    if v < 55:
-        return [0, 0]  # Negro
-    if 35 <= h <= 95:
+def decode_bgr_to_bits(b, g, r):
+    """Clasifica los promedios BGR de una celda en 2 bits."""
+    # Blanco: Todos los canales altos
+    if b > BGR_WHITE_THR and g > BGR_WHITE_THR and r > BGR_WHITE_THR:
+        return [1, 1]
+    # Negro: Todos los canales bajos
+    if b < BGR_BLACK_THR and g < BGR_BLACK_THR and r < BGR_BLACK_THR:
+        return [0, 0]
+    # Verde vs Rojo (Comparación de dominancia)
+    if g > r + BGR_DIFF_COLOR:
         return [0, 1]  # Verde
-    else:
-        return [1, 0]  # Rojo
+    return [1, 0]      # Rojo
 
 def main():
     cap = cv2.VideoCapture(CAMERA_INDEX)
@@ -54,14 +61,11 @@ def main():
             display = frame.copy()
             current_time = time.monotonic()
             
-            # --- 1. LOCALIZAR EL MARCO ROJO EN HSV ---
+            # --- 1. LOCALIZAR EL MARCO AZUL EN HSV (Más robusto que RGB para tracking) ---
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-            
-            mask_red1 = cv2.inRange(hsv, (0, 100, 100), (10, 255, 255))
-            mask_red2 = cv2.inRange(hsv, (160, 100, 100), (179, 255, 255))
-            mask_red = cv2.bitwise_or(mask_red1, mask_red2)
-            
-            contours, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            # Rango para Azul
+            mask_blue = cv2.inRange(hsv, (100, 100, 100), (130, 255, 255))
+            contours, _ = cv2.findContours(mask_blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
             screen_contour = None
             if contours:
@@ -79,7 +83,6 @@ def main():
                 pts = order_points(screen_contour.reshape(4, 2))
                 M = cv2.getPerspectiveTransform(pts, dst_pts)
                 warped = cv2.warpPerspective(frame, M, (1840, 1040))
-                warped_hsv = cv2.cvtColor(warped, cv2.COLOR_BGR2HSV)
                 
                 # --- 3. EXTRAER LOS 64 BITS (32 CELDAS * 2 BITS) ---
                 bits_read = []
@@ -93,11 +96,11 @@ def main():
                     x1 = 120 + (col * 200) + 60
                     x2 = 120 + (col * 200) + 140
                     
-                    cell_roi = warped_hsv[y1:y2, x1:x2]
-                    mean_hsv = np.mean(cell_roi, axis=(0, 1)) # [H, S, V] promedios
-                    total_v += mean_hsv[2] # Acumulamos el Valor (Brillo)
+                    cell_roi = warped[y1:y2, x1:x2]
+                    mean_bgr = np.mean(cell_roi, axis=(0, 1)) # [B, G, R]
+                    total_v += np.mean(mean_bgr) # Brillo promedio para Sync
                     
-                    bits = decode_hsv_to_bits(mean_hsv[0], mean_hsv[1], mean_hsv[2])
+                    bits = decode_bgr_to_bits(mean_bgr[0], mean_bgr[1], mean_bgr[2])
                     bits_read.extend(bits)
 
                 # --- 4. LÓGICA DE SINCRONIZACIÓN Y DECODIFICACIÓN ---
@@ -133,7 +136,7 @@ def main():
                     next_sample_time += (SAMPLE_INTERVAL_MS / 1000.0)
 
             else:
-                cv2.putText(display, "Buscando Marco Rojo...", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                cv2.putText(display, "Buscando Marco Azul...", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
                 
             cv2.imshow("Receptor 8x4 Color", display)
             if cv2.waitKey(1) & 0xFF in (27, ord('q')): break

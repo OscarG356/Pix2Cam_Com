@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Receptor 8x4 Color Ultra-Robustecido (PDI Avanzado)
-Decodifica Negro (00), Verde (01), Rojo (10) y Blanco (11).
-Incluye Apertura Morfológica, Bounding Box de emergencia y Cromaticidad Normalizada.
+Receptor 8x4 CSK - Optimizado para Laboratorio (Luces encendidas y ángulo <= 15°)
+Decodifica Negro (00), Verde (01), Rojo (10) y Blanco (11) usando espacio HSV robusto.
+Versión limpia sin ventanas secundarias de depuración.
 """
 
 import cv2
@@ -13,7 +13,7 @@ from pathlib import Path
 CAMERA_INDEX = 0
 OUTPUT_PATH = Path("mensaje_recibido.txt")
 SAMPLE_INTERVAL_MS = 200
-EXPECTED_PAYLOAD_BYTES = 512 # 8 bytes preámbulo + 498 texto + 6 bytes padding
+EXPECTED_PAYLOAD_BYTES = 512
 
 def order_points(pts):
     rect = np.zeros((4, 2), dtype="float32")
@@ -25,37 +25,28 @@ def order_points(pts):
     rect[3] = pts[np.argmax(diff)]
     return rect
 
-def decode_bgr_to_bits(b, g, r):
+def decode_hsv_to_bits(h, s, v):
     """
-    Clasifica usando Cromaticidad Normalizada y Brillo Promedio.
-    Independiza el color de las variaciones extremas de luz ambiental.
+    Decodificador adaptativo basado en el modelo de color HSV.
+    Ignora las variaciones de brillo (V) causadas por las luces del aula.
     """
-    total = float(b) + float(g) + float(r)
-    
-    # Evitar división por cero en negros rotundos
-    if total == 0: 
-        return [0, 0]
-        
-    v = total / 3.0
-    
-    # 1. Umbral de Negro Dinámico por Energía
-    if v < 75:  
+    # 1. Clasificación por brillo y saturación para casos extremos
+    if v < 65:  
         return [0, 0] # Negro (00)
         
-    # Calcular proporciones de cromaticidad normalizada
-    bn = b / total
-    gn = g / total
-    rn = r / total
-    
-    # 2. Umbral de Blanco por Simetría y Equilibrio de Canales
-    if v > 140 and abs(rn - gn) < 0.08 and abs(gn - bn) < 0.08:
+    if s < 45 and v > 130:
         return [1, 1] # Blanco (11)
+
+    # 2. Clasificación matemática por Matiz (Hue)
+    if 35 <= h <= 95:
+        return [0, 1] # Verde (01)
         
-    # 3. Dominancia Cromática para Verde vs Rojo
-    if gn > rn + 0.08:
-        return [0, 1]  # Verde (01)
-        
-    return [1, 0]  # Rojo (10)
+    if (0 <= h < 20) or (155 <= h <= 180):
+        return [1, 0] # Rojo (10)
+
+    if v > 120:
+        return [1, 1]
+    return [0, 0]
 
 def main():
     cap = cv2.VideoCapture(CAMERA_INDEX)
@@ -63,12 +54,14 @@ def main():
         print("Error: No se pudo abrir la cámara.")
         return
     
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    
     synced = False
     received_payload = bytearray()
     next_sample_time = 0.0
     sync_whites, sync_blacks = 0, 0
     
-    # Coordenadas de destino fijas para el aplanado rectangular (1840x1040)
     dst_pts = np.array([[0,0], [1840,0], [1840,1040], [0,1040]], dtype="float32")
     
     try:
@@ -79,13 +72,10 @@ def main():
             display = frame.copy()
             current_time = time.monotonic()
             
-            # --- 1. LOCALIZAR EL MARCO AZUL EN HSV (SISTEMA ANTIRREFLEJOS) ---
+            # --- 1. LOCALIZAR EL MARCO AZUL EN HSV ---
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            mask_blue = cv2.inRange(hsv, (95, 100, 60), (135, 255, 255))
             
-            # Filtro estricto para ignorar celestes o brillos blancos de la pantalla
-            mask_blue = cv2.inRange(hsv, (100, 130, 70), (135, 255, 255))
-            
-            # Operaciones morfológicas para destruir ruido interno y rellenar cortes en el marco azul
             kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
             mask_blue = cv2.morphologyEx(mask_blue, cv2.MORPH_OPEN, kernel)
             mask_blue = cv2.morphologyEx(mask_blue, cv2.MORPH_CLOSE, kernel)
@@ -95,73 +85,64 @@ def main():
             screen_contour = None
             if contours:
                 c = max(contours, key=cv2.contourArea)
-                if cv2.contourArea(c) > 8000: # Exigencia de tamaño mínimo
+                if cv2.contourArea(c) > 6000:
                     peri = cv2.arcLength(c, True)
                     approx = cv2.approxPolyDP(c, 0.02 * peri, True)
                     
                     if len(approx) == 4:
                         screen_contour = approx
                     else:
-                        # CAÍDA DE SEGURIDAD: Si el contorno se rompe o deforma,
-                        # forzamos una caja rectangular ideal de 4 puntos envolvente.
                         rect = cv2.minAreaRect(c)
                         box = cv2.boxPoints(rect)
                         screen_contour = np.int32(box).reshape(4, 1, 2)
 
             if screen_contour is not None:
-                # Dibujar tracking en magenta en la pantalla principal
+                # Dibujar el contorno del marco azul detectado
                 cv2.polylines(display, [screen_contour], True, (255, 0, 255), 3)
                 
-                # --- 2. ENDEREZAR LA PERSPECTIVA ---
+                # --- 2. CORRECCIÓN DE PERSPECTIVA ---
                 pts = order_points(screen_contour.reshape(4, 2))
                 M = cv2.getPerspectiveTransform(pts, dst_pts)
                 warped = cv2.warpPerspective(frame, M, (1840, 1040))
                 
-                # Filtrado Gaussiano para unificar el color y matar grano digital de la cámara
-                warped_filtered = cv2.GaussianBlur(warped, (11, 11), 0)
+                warped_blur = cv2.GaussianBlur(warped, (9, 9), 0)
+                warped_hsv = cv2.cvtColor(warped_blur, cv2.COLOR_BGR2HSV)
                 
-                # --- 3. EXTRAER LOS 64 BITS (32 CELDAS * 2 BITS) ---
+                # --- 3. EXTRAER LOS 64 BITS ---
                 bits_read = []
                 total_v = 0
                 for i in range(32):
                     row = i // 8  
                     col = i % 8
                     
-                    # Encontrar centro estricto de la celda
                     center_y = 120 + (row * 200) + 100
                     center_x = 120 + (col * 200) + 100
                     
-                    # Ultra-ROI central de 30x30 píxeles. Ignora por completo bordes cruzados.
-                    y1, y2 = center_y - 15, center_y + 15
-                    x1, x2 = center_x - 15, center_x + 15
+                    # Ventana estricta central de 20x20 píxeles
+                    y1, y2 = center_y - 10, center_y + 10
+                    x1, x2 = center_x - 10, center_x + 10
                     
-                    cell_roi = warped_filtered[y1:y2, x1:x2]
-                    mean_bgr = np.mean(cell_roi, axis=(0, 1))
-                    total_v += np.mean(mean_bgr) 
+                    cell_roi = warped_hsv[y1:y2, x1:x2]
+                    mean_hsv = np.mean(cell_roi, axis=(0, 1)) 
+                    total_v += mean_hsv[2] 
                     
-                    bits = decode_bgr_to_bits(mean_bgr[0], mean_bgr[1], mean_bgr[2])
+                    bits = decode_hsv_to_bits(mean_hsv[0], mean_hsv[1], mean_hsv[2])
                     bits_read.extend(bits)
 
-                    # Dibujar cuadritos de muestreo sobre la imagen sin filtrar para depuración visual
-                    cv2.rectangle(warped, (x1, y1), (x2, y2), (0, 255, 0), 2)
-
-                # Desplegar la matriz corregida. Debe verse plana y RECTANGULAR.
-                cv2.imshow("Warped Matrix (Debug)", cv2.resize(warped, (640, 360)))
-
-                # --- 4. LÓGICA DE SINCRONIZACIÓN Y DECODIFICACIÓN ---
+                # --- 4. LÓGICA DE SINCRONIZACIÓN ---
                 avg_v = total_v / 32 
                 
                 if not synced:
-                    if avg_v > 180: # Sync Blanco detectado
+                    if avg_v > 170: 
                         sync_whites += 1; sync_blacks = 0
-                    elif avg_v < 60: # Sync Negro detectado (Trigger)
+                    elif avg_v < 65: 
                         if sync_whites >= 1: sync_blacks += 1
                     else:
                         sync_blacks = 0
 
                     if sync_whites >= 1 and sync_blacks >= 1:
                         synced = True
-                        print("[SYNCED] ¡Enganchado a Color (8x4) con PDI!")
+                        print("[CONECTADO] Calibrado para ambiente de Laboratorio.")
                         next_sample_time = current_time + (SAMPLE_INTERVAL_MS / 1000.0)
                         
                 elif synced and current_time >= next_sample_time:
@@ -190,11 +171,9 @@ def main():
         cap.release()
         cv2.destroyAllWindows()
         if received_payload:
-            # Eliminación de preámbulo (8 bytes de 0x55)
             clean_payload = received_payload[8:]
             msg = clean_payload.decode('utf-8', errors='ignore')
-            
-            print(f"\n=== MENSAJE DECODIFICADO COLOR ===\n{msg}\n==================================")
+            print(f"\n=== MENSAJE DECODIFICADO (HSV) ===\n{msg}\n==================================")
             OUTPUT_PATH.write_bytes(clean_payload)
 
 if __name__ == "__main__":

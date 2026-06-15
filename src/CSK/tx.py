@@ -22,11 +22,11 @@ class Transmitter8x4Color:
         self.transmitting = False
 
     def _get_canvas(self):
-        """Lienzo Panorámico 8x4 con marco ROJO y foso negro."""
+        """Lienzo Panorámico 8x4 con marco AZUL y foso negro."""
         img = np.zeros((1080, 1920, 3), dtype=np.uint8)
         
-        # 1. Marco Rojo exterior ancho (X: 40 a 1880, Y: 20 a 1060) -> 1840x1040
-        cv2.rectangle(img, (40, 20), (1880, 1060), (0, 0, 255), -1)
+        # 1. Marco Azul exterior ancho (X: 40 a 1880, Y: 20 a 1060) -> 1840x1040
+        cv2.rectangle(img, (40, 20), (1880, 1060), (255, 0, 0), -1)
         
         # 2. Foso Negro de 80px (X: 80 a 1840, Y: 60 a 1020)
         cv2.rectangle(img, (80, 60), (1840, 1020), (0, 0, 0), -1)

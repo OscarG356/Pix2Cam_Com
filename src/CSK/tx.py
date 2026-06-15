@@ -9,7 +9,7 @@ import numpy as np
 import time
 from pathlib import Path
 
-TX_FRAME_MS = 500
+TX_FRAME_MS = 200
 
 class Transmitter8x4Color:
     def __init__(self, payload: bytes, frame_ms: int = TX_FRAME_MS):

@@ -111,18 +111,17 @@ class Transmitter8x4Color:
         self.transmitting = False
 
     def _send_sync_sequence(self):
-        """Secuencia: Blanco (Estabilización) -> Verde (Disparo)."""
-        # 1. Blanco por 600ms (3 frames) para estabilizar brillo de la cámara
-        for _ in range(3):
-            img = self._draw_matrix([3] * 32)
-            cv2.imshow('Emisor 8x4 Color', img)
-            if self._wait_until(time.monotonic() + self.frame_ms/1000.0) != 255: 
-                return False
-        
-        # 2. Verde por 200ms (1 frame) - Es el Trigger
-        img = self._draw_matrix([1] * 32)
+        """Secuencia: Blanco -> Negro (Disparo)."""
+        # 1. Blanco (1 frame)
+        img = self._draw_matrix([3] * 32) # Blanco (11)
         cv2.imshow('Emisor 8x4 Color', img)
-        if self._wait_until(time.monotonic() + self.frame_ms/1000.0) != 255: 
+        if self._wait_until(time.monotonic() + self.frame_ms/1000.0) != 255:
+            return False
+
+        # 2. Negro (1 frame) - Es el Trigger
+        img = self._draw_matrix([0] * 32) # Negro (00)
+        cv2.imshow('Emisor 8x4 Color', img)
+        if self._wait_until(time.monotonic() + self.frame_ms/1000.0) != 255:
             return False
             
         return True

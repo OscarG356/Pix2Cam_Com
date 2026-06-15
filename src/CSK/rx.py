@@ -11,7 +11,7 @@ from pathlib import Path
 
 CAMERA_INDEX = 0
 OUTPUT_PATH = Path("mensaje_recibido.txt")
-SAMPLE_INTERVAL_MS = 500
+SAMPLE_INTERVAL_MS = 200
 EXPECTED_PAYLOAD_BYTES = 512 # 8 bytes preámbulo + 498 texto + 6 bytes padding
 
 # Umbrales BGR para decodificación

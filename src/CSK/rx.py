@@ -11,7 +11,7 @@ from pathlib import Path
 
 CAMERA_INDEX = 0
 OUTPUT_PATH = Path("mensaje_recibido.txt")
-SAMPLE_INTERVAL_MS = 200
+SAMPLE_INTERVAL_MS = 145
 EXPECTED_PAYLOAD_BYTES = 512 # 8 bytes preámbulo + 498 texto + 6 bytes padding
 
 # Umbrales BGR para decodificación
@@ -46,6 +46,64 @@ def main():
     cap = cv2.VideoCapture(CAMERA_INDEX)
     if not cap.isOpened(): return
     
+    # 1. Intentar forzar el autoenfoque de la cámara (Puede que tu cámara lo ignore, pero vale la pena intentar)
+    cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)
+    
+    # =================================================================
+    # --- NUEVA FASE DE BARRIDO Y ESTABILIZACIÓN ---
+    # =================================================================
+    print("[SISTEMA] Iniciando barrido y estabilización de cámara...")
+    frames_estables = 0
+    REQUIRED_STABLE_FRAMES = 30 # Necesitamos ver el marco claro por ~1 segundo
+    
+    while frames_estables < REQUIRED_STABLE_FRAMES:
+        ok, frame = cap.read()
+        if not ok: continue
+        
+        display = frame.copy()
+        
+        # Convertimos a HSV
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        
+        # ECUALIZACIÓN POR SOFTWARE (Opcional, pero ayuda si la pantalla brilla mucho)
+        # Separamos los canales y aplicamos ecualización adaptativa al brillo (V)
+        h, s, v = cv2.split(hsv)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        v = clahe.apply(v)
+        hsv_eq = cv2.merge((h, s, v))
+        
+        # Buscamos el azul en la imagen ecualizada
+        mask_blue = cv2.inRange(hsv_eq, (100, 100, 100), (130, 255, 255))
+        contours, _ = cv2.findContours(mask_blue, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        found_good_frame = False
+        if contours:
+            c = max(contours, key=cv2.contourArea)
+            if cv2.contourArea(c) > 5000:
+                peri = cv2.arcLength(c, True)
+                approx = cv2.approxPolyDP(c, 0.05 * peri, True)
+                if len(approx) == 4:
+                    cv2.polylines(display, [approx], True, (0, 255, 0), 3) # Marco verde de calibración
+                    found_good_frame = True
+
+        if found_good_frame:
+            frames_estables += 1
+            cv2.putText(display, f"Enfocando... {frames_estables}/{REQUIRED_STABLE_FRAMES}", 
+                        (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        else:
+            frames_estables = 0 # Si pierde el marco, reinicia el conteo
+            cv2.putText(display, "Buscando pantalla para ajustar...", 
+                        (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+        cv2.imshow("Fase de Calibracion", display)
+        if cv2.waitKey(1) & 0xFF in (27, ord('q')):
+            cap.release(); cv2.destroyAllWindows(); return
+
+    print("[SISTEMA] ¡Cámara estabilizada y marco enganchado!")
+    cv2.destroyWindow("Fase de Calibracion")
+    # =================================================================
+    
+    # Variables originales del sistema
     synced = False
     received_payload = bytearray()
     next_sample_time = 0.0
@@ -56,6 +114,9 @@ def main():
     try:
         while True:
             ok, frame = cap.read()
+            # ... AQUÍ CONTINÚA TU BUCLE WHILE ORIGINAL ...
+            # Recuerda que si el brillo sigue siendo un problema en la fase de lectura, 
+            # puedes usar la misma técnica de separar HSV y aplicar `clahe` a `v` antes de leer los colores.
             if not ok: continue
             
             display = frame.copy()
